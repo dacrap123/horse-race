@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Horse Race Board</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Include canvas-confetti library to enable confetti() -->
+  <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.5.1/dist/confetti.browser.min.js"></script>
+  <style>
+    :root { --cell-size: 40px; }
+    body { font-family: sans-serif; background: #f3f4f6; padding: 1rem; }
+    #undoBtn { position: absolute; top:1rem; right:1rem; padding:0.5rem 1rem; background:#f59e0b; color:white; border:none; border-radius:0.375rem; cursor:pointer; }
+    .cell { flex:0 0 var(--cell-size); width:var(--cell-size); height:var(--cell-size); border:1px solid #ccc; border-radius:50%; display:flex; align-items:center; justify-content:center; box-sizing:border-box; background:white; }
+    .scratch-cell { background:#fee2e2; cursor:pointer; }
+    .start-cell { background:repeating-linear-gradient(45deg,#fff 0 8px,#000 8px 16px); }
+    .finish-cell { background:#d1fae5; }
+    .horse { flex:0 0 24px; width:24px; height:24px; border-radius:50%; display:flex; align-items:center; justify-content:center; background:#8b5cf6; color:white; font-size:11px; box-sizing:border-box; }
+    #overlay,#endOverlay,#betOverlay { position:fixed; inset:0; background:rgba(0,0,0,0.6); display:none; align-items:center; justify-content:center; }
+    .box { background:white; padding:2rem; border-radius:1rem; text-align:center; box-shadow:0 4px 10px rgba(0,0,0,0.3); }
+    .bet-input { width:100px; padding:0.5rem; border:1px solid #ccc; border-radius:0.25rem; box-sizing:border-box; }
+    .flex { display:flex; }
+    .justify-between { justify-content:space-between; }
+    .cursor-pointer { cursor:pointer; }
+    .overflow-x-auto { overflow-x:auto; }
+    .space-y-1 > * + * { margin-top:0.25rem; }
+  </style>
+</head>
+<body>
+  <audio id="startSound" src="start-trumpet.mp3"></audio>
+  <button id="undoBtn">Undo</button>
+  <h1 class="text-2xl font-semibold mb-4">Horse Race Board</h1>
+
+  <div id="betOverlay"><div class="box">
+    <h2 class="text-xl font-bold mb-4">Choose a bet denomination</h2>
+    <div class="mb-4 text-left">
+      <label><input type="radio" name="bet" value="0.25"> $0.25</label><br>
+      <label><input type="radio" name="bet" value="0.5"> $0.50</label><br>
+      <label><input type="radio" name="bet" value="1"> $1</label><br>
+      <label><input type="radio" name="bet" value="5"> $5</label><br>
+      <label>Other: $<input type="text" id="customBet" class="bet-input" placeholder="0.00"></label>
+    </div>
+    <button id="betConfirm" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded">Confirm</button>
+  </div></div>
+
+  <p class="mb-4 text-gray-600">Click red circles to scratch, row or start cell to move, or keys (2–9,0,-,=).</p>
+  <div class="overflow-x-auto"><div id="board" class="space-y-1"></div></div>
+
+  <div id="overlay"><div class="box">
+    <h2 class="text-xl font-bold mb-4">Let the race begin!</h2>
+    <button id="startBtn" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded">Start</button>
+  </div></div>
+
+  <div id="endOverlay"><div class="box">
+    <h2 id="winnerMsg" class="text-xl font-bold mb-4"></h2>
+    <button id="resetBtn" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded">Reset</button>
+  </div></div>
+
+  <script>
+    const SCRATCH_ZONE = 4;
+    const TRACK_LEN = {2:3,3:6,4:8,5:11,6:14,7:17,8:14,9:11,10:8,11:6,12:3};
+    const CELL_PX = 40;
+    const MAX_TRACK_LEN = Math.max(...Object.values(TRACK_LEN));
+    const MAX_TRACK_PX = MAX_TRACK_LEN * CELL_PX;
+
+    let betValue = null;
+    let horses = {};
+    let scratchOrder = [];
+    let racingStarted = false;
+    let history = [];
+
+    const boardEl = document.getElementById('board');
+    const betOverlay = document.getElementById('betOverlay');
+    const overlayEl = document.getElementById('overlay');
+    const endEl = document.getElementById('endOverlay');
+    const startBtn = document.getElementById('startBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const winnerMsg = document.getElementById('winnerMsg');
+    const undoBtn = document.getElementById('undoBtn');
+    const betConfirm = document.getElementById('betConfirm');
+    const startSound = document.getElementById('startSound');
+
+    function snapshot() {
+      return {
+        horses: JSON.parse(JSON.stringify(horses)),
+        scratchOrder: [...scratchOrder],
+        racingStarted
+      };
+    }
+
+    function updateUndo() {
+      undoBtn.disabled = history.length === 0;
+      undoBtn.style.opacity = history.length === 0 ? 0.5 : 1;
+    }
+
+    undoBtn.onclick = () => {
+      if (history.length === 0) return;
+      const prev = history.pop();
+      horses = JSON.parse(JSON.stringify(prev.horses));
+      scratchOrder = [...prev.scratchOrder];
+      racingStarted = prev.racingStarted;
+      overlayEl.style.display = (scratchOrder.length === 4 && !racingStarted) ? 'flex' : 'none';
+      endEl.style.display = (!racingStarted && scratchOrder.length === 4) ? 'flex' : 'none';
+      updateUndo();
+      renderBoard();
+    };
+
+    function initGame() {
+      history = [];
+      updateUndo();
+      horses = {};
+      Object.keys(TRACK_LEN).forEach(n => horses[n] = {pos: 0, scratched: false});
+      scratchOrder = [];
+      racingStarted = false;
+      overlayEl.style.display = 'none';
+      endEl.style.display = 'none';
+      renderBoard();
+    }
+
+    function renderBoard() {
+      boardEl.innerHTML = '';
+      Object.keys(horses).sort((a, b) => a - b).forEach(num => {
+        const h = horses[num];
+        const tl = TRACK_LEN[num];
+        const row = document.createElement('div');
+        row.className = 'flex items-center space-x-1 cursor-pointer';
+        row.onclick = () => { if (racingStarted && !h.scratched) moveHorse(+num); };
+
+        const lbl = document.createElement('div'); lbl.textContent = num; lbl.className = 'w-6 text-right'; row.appendChild(lbl);
+        const sd = document.createElement('div'); sd.className = 'flex';
+        for (let i = SCRATCH_ZONE; i >= 1; i--) {
+          const c = document.createElement('div'); c.className = 'cell scratch-cell'; c.onclick = e => { e.stopPropagation(); scratchHorse(+num); };
+          if (h.pos === -i) addToken(c, num);
+          sd.appendChild(c);
+        }
+        row.appendChild(sd);
+
+        const sc = document.createElement('div'); sc.className = 'cell start-cell'; if (h.pos === 0) addToken(sc, num);
+        sc.onclick = () => { if (racingStarted && !h.scratched) moveHorse(+num); };
+        row.appendChild(sc);
+
+        if (h.scratched) {
+          const order = scratchOrder.indexOf(+num) + 1;
+          const pay = (betValue * order).toFixed(2);
+          const inp = document.createElement('input'); inp.type = 'text'; inp.disabled = true; inp.value = `$${pay}`;
+          inp.className = 'bet-input'; inp.style.width = `${MAX_TRACK_PX}px`;
+          row.appendChild(inp);
+        } else {
+          const td = document.createElement('div'); td.className = 'flex justify-between'; td.style.width = `${MAX_TRACK_PX}px`;
+          for (let i = 1; i <= tl; i++) {
+            const c = document.createElement('div'); c.className = 'cell' + (i === tl ? ' finish-cell' : ''); if (h.pos === i) addToken(c, num); td.appendChild(c);
+          }
+          row.appendChild(td);
+        }
+
+        boardEl.appendChild(row);
+      });
+    }
+
+    function addToken(cell, num) {
+      const t = document.createElement('div'); t.className = 'horse'; t.textContent = num; cell.appendChild(t);
+    }
+
+    function scratchHorse(n) {
+      if (racingStarted || scratchOrder.length >= 4) return;
+      history.push(snapshot()); updateUndo();
+      const h = horses[n]; if (h.scratched) return;
+      const ord = scratchOrder.length + 1;
+      h.scratched = true; h.pos = -ord;
+      scratchOrder.push(n);
+      renderBoard();
+      if (scratchOrder.length === 4) overlayEl.style.display = 'flex';
+    }
+
+    function moveHorse(n) {
+      if (!racingStarted) return;
+      history.push(snapshot()); updateUndo();
+      const h = horses[n]; if (h.scratched) return;
+      const fin = TRACK_LEN[n]; if (h.pos < fin) { h.pos++; renderBoard(); }
+      if (h.pos === fin) {
+        racingStarted = false;
+        winnerMsg.textContent = `Horse ${n} wins!`;
+        endEl.style.display = 'flex';
+        // Fixed origin y-value for confetti
+        confetti({ particleCount: 200, spread: 60, origin: { y: 0.3 } });
+      }
+    }
+
+    document.addEventListener('keydown', e => {
+      const k = e.key; const map = {0:10, '-':11, '=':12};
+      const num = (k >= '2' && k <= '9') ? +k : map[k]; if (!num) return;
+      racingStarted ? moveHorse(num) : scratchHorse(num);
+    });
+
+    betConfirm.onclick = () => {
+      const rs = document.getElementsByName('bet'); const sel = Array.from(rs).find(r => r.checked);
+      betValue = sel ? parseFloat(sel.value) : (parseFloat(document.getElementById('customBet').value) || 0);
+      betOverlay.style.display = 'none'; initGame();
+    };
+
+    startBtn.onclick = () => {
+      history.push(snapshot()); updateUndo(); racingStarted = true; overlayEl.style.display = 'none'; startSound.play();
+    };
+
+    resetBtn.onclick = initGame;
+
+    document.addEventListener('DOMContentLoaded', () => { betOverlay.style.display = 'flex'; initGame(); });
+  </script>
+</body>
+</html>
